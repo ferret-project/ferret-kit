@@ -116,6 +116,22 @@ public enum OAuth {
         ], clientId: tokens.clientId, resource: tokens.resource, keepRefresh: refreshToken, session: session)
     }
 
+    /// Signing out: the server forgets the refresh token (and the access tokens made from it), so a copy left anywhere
+    /// is useless (RFC 7009). Best effort: a server without a revocation endpoint, or out of reach, is no reason to stay
+    /// signed in, so this never throws.
+    public static func revoke(_ tokens: OAuthTokens, server: URL, session: URLSession = .shared) async {
+        struct Metadata: Decodable { let revocation_endpoint: URL? }
+        guard let metadata: Metadata = try? await getJSON(server.appending(path: ".well-known/oauth-authorization-server"), session),
+              let endpoint = metadata.revocation_endpoint
+        else { return }
+        let (token, hint) = tokens.refreshToken.map { ($0, "refresh_token") } ?? (tokens.accessToken, "access_token")
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "POST"
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        request.httpBody = formBody(["token": token, "token_type_hint": hint, "client_id": tokens.clientId])
+        _ = try? await session.data(for: request)
+    }
+
     // MARK: - Pieces
 
     static func tokenRequest(_ endpoint: URL, _ form: [String: String], clientId: String, resource: String, keepRefresh: String?, session: URLSession) async throws -> OAuthTokens {
