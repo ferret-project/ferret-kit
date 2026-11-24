@@ -6,9 +6,12 @@ import Testing
     @Test func typedAddresses() {
         #expect(ServerAddress.parse("ferret.example.com")?.absoluteString == "https://ferret.example.com")
         #expect(ServerAddress.parse("  https://Ferret.Example.com/#/items  ")?.absoluteString == "https://ferret.example.com")
-        #expect(ServerAddress.parse("192.168.1.20:8787")?.absoluteString == "http://192.168.1.20:8787")
-        #expect(ServerAddress.parse("inventory.lan")?.absoluteString == "http://inventory.lan")
-        #expect(ServerAddress.parse("https://inventory.lan")?.absoluteString == "https://inventory.lan")
+        // https unless http:// is typed, home networks included.
+        #expect(ServerAddress.parse("192.168.1.20:8787")?.absoluteString == "https://192.168.1.20:8787")
+        #expect(ServerAddress.parse("http://192.168.1.20:8787")?.absoluteString == "http://192.168.1.20:8787")
+        #expect(ServerAddress.parse("inventory.lan")?.absoluteString == "https://inventory.lan")
+        #expect(ServerAddress.parse("HTTP://Inventory.lan")?.absoluteString == "http://inventory.lan")
+        #expect(ServerAddress.parse("nas:8787")?.absoluteString == "https://nas:8787")
         #expect(ServerAddress.parse("ftp://x.com") == nil)
         #expect(ServerAddress.parse("not an address") == nil)
         #expect(ServerAddress.parse("") == nil)
@@ -21,7 +24,15 @@ import Testing
         #expect(Money.cents(from: "12.5") == 1250)
         #expect(Money.cents(from: "$1,299.99") == 129_999)
         #expect(Money.cents(from: "12,50") == 1250)
+        #expect(Money.cents(from: "12,5") == 1250)
+        #expect(Money.cents(from: "1.299,99") == 129_999)
+        #expect(Money.cents(from: "1 299,99 zł") == 129_999)
+        #expect(Money.cents(from: "1,299") == 129_900)
+        #expect(Money.cents(from: "1.299") == 129_900)
+        #expect(Money.cents(from: ",5") == 50)
+        #expect(Money.cents(from: "40") == 4000)
         #expect(Money.cents(from: "abc") == nil)
+        #expect(Money.cents(from: ".") == nil)
         #expect(Money.editable(1250) == "12.50")
         #expect(Money.editable(1200) == "12")
         #expect(Money.editable(nil) == "")
@@ -75,7 +86,8 @@ import Testing
         #expect(token.headers == ["CF-Access-Client-Id": "abc.access", "CF-Access-Client-Secret": "s3cret"])
         #expect(token.isComplete)
         #expect(!AccessToken(clientId: "abc", clientSecret: " ").isComplete)
-        #expect(URLSession.ferret(access: nil) === URLSession.shared)
+        // Half a token is no token: the same session as none.
+        #expect(URLSession.ferret(access: AccessToken(clientId: "abc", clientSecret: "")) === URLSession.ferret(access: nil))
         #expect(URLSession.ferret(access: token).configuration.httpAdditionalHeaders?["CF-Access-Client-Id"] as? String == "abc.access")
     }
 

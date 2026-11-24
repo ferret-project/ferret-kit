@@ -70,16 +70,23 @@ final class Stub: URLProtocol, @unchecked Sendable {
     override func stopLoading() {}
 }
 
-/// What the client handed back to be kept.
-final class Kept: @unchecked Sendable {
+/// The store the client keeps the sign-in in, and what it told the app.
+final class Kept: SessionKeeper, @unchecked Sendable {
     private let lock = NSLock()
     private var changes: [Session?] = []
-    var session: Session?
+    private var session: Session?
+    /// What the store held each time the app was told of new tokens (kept first?).
+    private(set) var keptWhenTold: [Session?] = []
 
-    func record(_ change: Session?) { lock.withLock { changes.append(change); session = change } }
+    func record(_ change: Session?) { lock.withLock { changes.append(change); keptWhenTold.append(session) } }
     var signedOut: Bool { lock.withLock { changes.contains { $0 == nil } } }
     var stored: Session? { lock.withLock { session } }
-    func store(_ s: Session) { lock.withLock { session = s } }
+    func store(_ s: Session?) { lock.withLock { session = s } }
+
+    func load() -> Session? { stored }
+    func exists() -> Bool { stored != nil }
+    func save(_ session: Session) throws { store(session) }
+    func clear() { store(nil) }
 }
 
 @Suite(.serialized) struct ClientTests {
@@ -90,10 +97,9 @@ final class Kept: @unchecked Sendable {
         OAuthTokens(accessToken: "at_\(name)", refreshToken: "rt_\(name)", expiresAt: Date().addingTimeInterval(expiresIn), clientId: "c", tokenEndpoint: URL(string: "http://ferret.test\(Self.tokenPath)")!, resource: "http://ferret.test/mcp")
     }
 
+    /// `shared`: the client keeps its sign-in in `kept` (otherwise it has no store and `kept` only hears of changes).
     func client(_ tokens: OAuthTokens, kept: Kept, reload: Bool = false) -> FerretClient {
-        var reader: (@Sendable () -> Session?)?
-        if reload { reader = { @Sendable in kept.stored } }
-        return FerretClient(session: Session(server: server, credential: .oauth(tokens)), urlSession: Stub.session(), reload: reader, refreshRetries: [.zero, .zero], onSessionChange: { kept.record($0) })
+        FerretClient(session: Session(server: server, credential: .oauth(tokens)), store: reload ? kept : nil, urlSession: Stub.session(), refreshRetries: [.zero, .zero], onSessionChange: { kept.record($0) })
     }
 
     static let issued = #"{"access_token":"at_new","refresh_token":"rt_new","expires_in":3600}"#
@@ -105,13 +111,47 @@ final class Kept: @unchecked Sendable {
             return r.value(forHTTPHeaderField: "Authorization") == "Bearer at_new" ? .reply(200, Self.me) : .reply(401, "{}")
         }
         let kept = Kept()
-        let c = client(tokens("old", expiresIn: 10), kept: kept)
+        kept.store(Session(server: server, credential: .oauth(tokens("old", expiresIn: 10))))
+        let c = client(tokens("old", expiresIn: 10), kept: kept, reload: true)
         async let a = c.me()
         async let b = c.me()
         async let d = c.me()
         _ = try await (a, b, d)
         #expect(Stub.count(Self.tokenPath) == 1)
         if case .oauth(let saved) = kept.stored?.credential { #expect(saved.refreshToken == "rt_new") } else { Issue.record("not saved") }
+        // Kept before the app heard of them.
+        if case .oauth(let first) = kept.keptWhenTold.first??.credential { #expect(first.refreshToken == "rt_new") } else { Issue.record("told before keeping") }
+    }
+
+    @Test func anEndedSignInIsForgottenInTheStore() async {
+        Stub.reset { r, _ in r.url!.path == Self.tokenPath ? .reply(400, #"{"error":"invalid_grant"}"#) : .reply(401, "{}") }
+        let kept = Kept()
+        kept.store(Session(server: server, credential: .oauth(tokens("old"))))
+        await #expect(throws: FerretError.signedOut) { try await client(tokens("old"), kept: kept, reload: true).me() }
+        #expect(kept.stored == nil)
+        #expect(kept.signedOut)
+    }
+
+    @Test func askMayTakeMinutes() async throws {
+        nonisolated(unsafe) var timeout: TimeInterval = 0
+        Stub.reset { r, _ in
+            if r.url!.path == "/api/v1/ask" { timeout = r.timeoutInterval }
+            return .reply(200, #"{"answer":"x","found":true,"citations":[]}"#)
+        }
+        _ = try await client(tokens("t"), kept: Kept()).ask("where is the drill?")
+        #expect(timeout >= 300)
+    }
+
+    @Test func aRedirectElsewhereIsNotFollowedOrSentTheToken() async {
+        Stub.reset { _, _ in .reply(302, "", headers: ["Location": "https://elsewhere.example/api/v1/me"]) }
+        do {
+            _ = try await client(tokens("t"), kept: Kept()).me()
+            Issue.record("followed")
+        } catch {
+            #expect(error is FerretError)
+            #expect(error.localizedDescription.contains("elsewhere.example"))
+        }
+        #expect(Stub.seen.count == 1)
     }
 
     @Test func aTurnedAwayTokenIsRefreshedOnceAndTriedAgain() async throws {
@@ -231,5 +271,85 @@ final class Kept: @unchecked Sendable {
 
     @Test func aRefusalSaysWhy() {
         #expect(KeychainError(status: errSecMissingEntitlement).errorDescription?.contains("Keychain") == true)
+    }
+}
+
+/// Sign-in against the same stub (one suite, so tests sharing it never run at once).
+extension ClientTests {
+    func endpoints(issuer: String? = "http://ferret.test/api/auth") -> OAuth.Endpoints {
+        OAuth.Endpoints(authorization: URL(string: "http://ferret.test/api/auth/oauth2/authorize")!, token: URL(string: "http://ferret.test/api/auth/oauth2/token")!, registration: URL(string: "http://ferret.test/api/auth/oauth2/register")!, resource: "http://ferret.test/mcp", issuer: issuer)
+    }
+
+    @Test func aForgottenRegistrationIsNoticed() async {
+        Stub.reset { r, _ in
+            let id = URLComponents(url: r.url!, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "client_id" }?.value
+            return id == "gone"
+                ? .reply(302, "", headers: ["Location": "http://ferret.test/api/auth/error?error=invalid_client&error_description=client+not+found"])
+                : .reply(302, "", headers: ["Location": "http://ferret.test/#/connect/sign-in?client_id=\(id ?? "")"])
+        }
+        let e = endpoints()
+        #expect(await OAuth.registrationGone(OAuth.authorizeURL(e, clientId: "gone", redirectURI: "x:/oauth", state: "s", verifier: "v"), session: Stub.session()))
+        #expect(!(await OAuth.registrationGone(OAuth.authorizeURL(e, clientId: "known", redirectURI: "x:/oauth", state: "s", verifier: "v"), session: Stub.session())))
+    }
+
+    @Test func startRegistersAgainWhenTheServerForgotTheApp() async throws {
+        Stub.reset { r, _ in
+            switch r.url!.path {
+            case "/.well-known/oauth-authorization-server":
+                return .reply(200, #"{"issuer":"http://ferret.test/api/auth","authorization_endpoint":"http://ferret.test/api/auth/oauth2/authorize","token_endpoint":"http://ferret.test/api/auth/oauth2/token","registration_endpoint":"http://ferret.test/api/auth/oauth2/register"}"#)
+            case "/.well-known/oauth-protected-resource/mcp":
+                return .reply(200, #"{"resource":"http://ferret.test/mcp"}"#)
+            case "/api/auth/oauth2/register":
+                return .reply(201, #"{"client_id":"fresh"}"#)
+            default:
+                return .reply(302, "", headers: ["Location": "http://ferret.test/api/auth/error?error=invalid_client"])
+            }
+        }
+        let start = try await OAuth.start(server: URL(string: "http://ferret.test")!, clientName: "Test", knownClientId: "gone", session: Stub.session())
+        #expect(start.clientId == "fresh")
+        #expect(start.url.absoluteString.contains("client_id=fresh"))
+        #expect(start.endpoints.issuer == "http://ferret.test/api/auth")
+    }
+
+    @Test func aReplyFromAnotherServerIsRefused() async {
+        Stub.reset { _, _ in .reply(200, #"{"access_token":"a","refresh_token":"r","expires_in":3600}"#) }
+        let start = OAuth.Start(url: URL(string: "http://ferret.test")!, state: "s", verifier: "v", clientId: "c", endpoints: endpoints(), redirectURI: "x:/oauth")
+        await #expect(throws: FerretError.self) {
+            _ = try await OAuth.finish(start, callback: URL(string: "x:/oauth?code=abc&state=s&iss=https%3A%2F%2Fevil.example%2Fapi%2Fauth")!, session: Stub.session())
+        }
+        let ok = try? await OAuth.finish(start, callback: URL(string: "x:/oauth?code=abc&state=s&iss=http%3A%2F%2Fferret.test%2Fapi%2Fauth")!, session: Stub.session())
+        #expect(ok?.accessToken == "a")
+    }
+}
+
+@Suite struct RedirectTests {
+    @Test func onlyTheSameHostAndUpToHttps() {
+        let a = URL(string: "http://inventory.lan/api/v1/me")!
+        #expect(SameHostRedirects.allowed(from: a, to: URL(string: "https://inventory.lan/api/v1/me")))
+        #expect(SameHostRedirects.allowed(from: URL(string: "https://Inventory.lan/x"), to: URL(string: "https://inventory.lan/y")))
+        #expect(!SameHostRedirects.allowed(from: URL(string: "https://inventory.lan/x"), to: URL(string: "http://inventory.lan/x")))
+        #expect(!SameHostRedirects.allowed(from: a, to: URL(string: "https://elsewhere.example/api/v1/me")))
+        #expect(!SameHostRedirects.allowed(from: URL(string: "https://inventory.lan:8443/x"), to: URL(string: "https://inventory.lan/x")))
+    }
+
+    @Test func accessLoginRedirectIsAccessBlocked() {
+        let response = HTTPURLResponse(url: URL(string: "https://ferret.example.com/api/v1/me")!, statusCode: 302, httpVersion: nil, headerFields: ["Location": "https://team.cloudflareaccess.com/cdn-cgi/access/login"])!
+        #expect(FerretError.isAccessBlock(response))
+    }
+
+    @Test func oneSessionPerAccessToken() {
+        let token = AccessToken(clientId: "id", clientSecret: "secret")
+        #expect(URLSession.ferret(access: token) === URLSession.ferret(access: token))
+        #expect(URLSession.ferret(access: nil) !== URLSession.ferret(access: token))
+        #expect(URLSession.ferret(access: nil).configuration.httpAdditionalHeaders == nil)
+    }
+}
+
+@Suite struct OfflineNameTests {
+    @Test func idsNeverReachOutsideTheFolder() {
+        let name = OfflineStore.fileName("item", "../../etc/passwd")
+        #expect(!name.contains("/") && !name.contains(".."))
+        #expect(name == OfflineStore.fileName("item", "../../etc/passwd"))
+        #expect(name != OfflineStore.fileName("item", "other"))
     }
 }

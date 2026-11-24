@@ -1,8 +1,18 @@
 import Foundation
+import LocalAuthentication
 import Security
 
+/// Where a sign-in is kept: the Keychain (`SessionStore`), or a stand-in for tests.
+public protocol SessionKeeper: Sendable {
+    func load() -> Session?
+    /// Whether one is kept, without reading it (no Keychain prompt).
+    func exists() -> Bool
+    func save(_ session: Session) throws
+    func clear()
+}
+
 /// The signed-in session, kept in the Keychain (never UserDefaults): it holds a token or an API key.
-public struct SessionStore: Sendable {
+public struct SessionStore: SessionKeeper {
     let item: KeychainItem
 
     /// `accessGroup`: a shared Keychain group, so the share extension and widgets can use the same sign-in.
@@ -119,7 +129,9 @@ struct KeychainItem: Sendable {
         var query = base(modern: modern)
         query[kSecReturnAttributes as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
-        query[kSecUseAuthenticationUI as String] = kSecUseAuthenticationUIFail
+        let context = LAContext()
+        context.interactionNotAllowed = true
+        query[kSecUseAuthenticationContext as String] = context
         let status = SecItemCopyMatching(query as CFDictionary, nil)
         return status == errSecSuccess || status == errSecInteractionNotAllowed
     }

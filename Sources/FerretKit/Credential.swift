@@ -54,7 +54,7 @@ public struct Session: Codable, Sendable, Equatable {
 /// A Cloudflare Access service token (Zero Trust → Access → Service credentials): sent as two headers with every
 /// request, so a Ferret behind Access lets the app through. Access answers the first request with a
 /// `CF_Authorization` cookie, which carries browser pages (the sign-in page, the web screens) after that.
-public struct AccessToken: Codable, Sendable, Equatable {
+public struct AccessToken: Codable, Sendable, Hashable {
     public var clientId: String
     public var clientSecret: String
 
@@ -72,11 +72,48 @@ public struct AccessToken: Codable, Sendable, Equatable {
 }
 
 public extension URLSession {
-    /// The session for one server: plain, or adding the Access token's headers to every request.
+    /// The session for one server, adding the Access token's headers (if any) to every request, and following a
+    /// redirect only on the same host (an http → https upgrade): elsewhere it would carry the sign-in and the Access
+    /// token along. One session per Access token, reused.
     static func ferret(access: AccessToken?) -> URLSession {
-        guard let access, access.isComplete else { return .shared }
-        let configuration = URLSessionConfiguration.default
-        configuration.httpAdditionalHeaders = access.headers
-        return URLSession(configuration: configuration)
+        let key = access.flatMap { $0.isComplete ? $0 : nil }
+        return SessionCache.shared.session(for: key) {
+            let configuration = URLSessionConfiguration.default
+            if let key { configuration.httpAdditionalHeaders = key.headers }
+            return URLSession(configuration: configuration, delegate: SameHostRedirects(), delegateQueue: nil)
+        }
+    }
+}
+
+/// The sessions made so far (each is kept for the app's life rather than made per sign-in and never closed).
+final class SessionCache: @unchecked Sendable {
+    static let shared = SessionCache()
+    private let lock = NSLock()
+    private var sessions: [AccessToken?: URLSession] = [:]
+
+    func session(for key: AccessToken?, make: () -> URLSession) -> URLSession {
+        lock.withLock {
+            if let made = sessions[key] { return made }
+            let made = make()
+            sessions[key] = made
+            return made
+        }
+    }
+}
+
+/// Follows a redirect only to the same host (and from http to https, never back); otherwise the redirect itself is
+/// the reply.
+final class SameHostRedirects: NSObject, URLSessionTaskDelegate, Sendable {
+    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest) async -> URLRequest? {
+        Self.allowed(from: task.originalRequest?.url ?? response.url, to: request.url) ? request : nil
+    }
+
+    static func allowed(from: URL?, to: URL?) -> Bool {
+        guard let from, let to, let a = from.host()?.lowercased(), let b = to.host()?.lowercased(), a == b else { return false }
+        switch (from.scheme?.lowercased(), to.scheme?.lowercased()) {
+        case ("https", "https"), ("http", "http"): return from.port == to.port
+        case ("http", "https"): return to.port == nil || to.port == 443
+        default: return false
+        }
     }
 }

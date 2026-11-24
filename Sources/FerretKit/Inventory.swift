@@ -13,7 +13,7 @@ public extension FerretClient {
 
     /// Ask Ferret a question about the household's things (needs an AI model on the server: a 409 otherwise).
     func ask(_ question: String) async throws -> AskAnswer {
-        try await send("POST", "ask", body: ["question": question])
+        try await send("POST", "ask", body: ["question": question], timeout: FerretClient.slowCall)
     }
 
     /// The things this person opened last, newest first (1–12).

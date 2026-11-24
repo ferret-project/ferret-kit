@@ -7,35 +7,43 @@ import Foundation
 ///
 /// Refresh tokens rotate: each refresh uses the old one up, and Ferret accepts it again for only 60 seconds
 /// (`refreshTokenReuseInterval`) before treating a reuse as theft and ending every sign-in of this app. So a refresh
-/// whose reply was lost is tried again at once, inside that minute, and before refreshing the client reads the kept
-/// session (`reload`) in case another process sharing it (a share extension, a widget) refreshed first.
+/// whose reply was lost is tried again at once, inside that minute; new tokens are kept in `store` before anything else
+/// happens (so quitting a moment later can't leave used-up ones behind); and before refreshing the client reads the
+/// store in case another process sharing it (a share extension, a widget) refreshed first.
 public actor FerretClient {
     public nonisolated let server: URL
     private var credential: Credential
     private var refreshing: Task<OAuthTokens, Error>?
     private let urlSession: URLSession
     private let onSessionChange: @Sendable (Session?) -> Void
-    private let reload: (@Sendable () -> Session?)?
+    private let store: (any SessionKeeper)?
+    private let onKeepFailed: @Sendable (Error) -> Void
     /// How long to wait before each new try of a refresh the network cut short (all well inside Ferret's minute).
     let refreshRetries: [Duration]
 
     private let access: AccessToken?
 
+    /// `store`: where the sign-in is kept (the Keychain). The client keeps refreshed tokens there itself, at once, reads
+    /// it before refreshing (another process may have refreshed), and forgets the sign-in there when it ends.
+    /// `onSessionChange`: new tokens (already kept), or nil when the sign-in ended. `onKeepFailed`: the store refused.
     /// `urlSession`: for tests; otherwise one that adds the server's Cloudflare Access headers, if it has any.
-    /// `reload`: reads the kept session (the Keychain), so tokens another process refreshed are used, not used up again.
-    public init(session: Session, urlSession: URLSession? = nil, reload: (@Sendable () -> Session?)? = nil, onSessionChange: @escaping @Sendable (Session?) -> Void = { _ in }) {
-        self.init(session: session, urlSession: urlSession, reload: reload, refreshRetries: [.seconds(1), .seconds(4), .seconds(10)], onSessionChange: onSessionChange)
+    public init(session: Session, store: (any SessionKeeper)? = nil, urlSession: URLSession? = nil, onKeepFailed: @escaping @Sendable (Error) -> Void = { _ in }, onSessionChange: @escaping @Sendable (Session?) -> Void = { _ in }) {
+        self.init(session: session, store: store, urlSession: urlSession, refreshRetries: [.seconds(1), .seconds(4), .seconds(10)], onKeepFailed: onKeepFailed, onSessionChange: onSessionChange)
     }
 
-    init(session: Session, urlSession: URLSession?, reload: (@Sendable () -> Session?)?, refreshRetries: [Duration], onSessionChange: @escaping @Sendable (Session?) -> Void) {
+    init(session: Session, store: (any SessionKeeper)?, urlSession: URLSession?, refreshRetries: [Duration], onKeepFailed: @escaping @Sendable (Error) -> Void = { _ in }, onSessionChange: @escaping @Sendable (Session?) -> Void) {
         server = session.server
         credential = session.credential
         access = session.access
         self.urlSession = urlSession ?? .ferret(access: session.access)
-        self.reload = reload
+        self.store = store
         self.refreshRetries = refreshRetries
+        self.onKeepFailed = onKeepFailed
         self.onSessionChange = onSessionChange
     }
+
+    /// How long a call may take: Ask Ferret's model can take minutes on a busy self-hosted GPU (Ferret allows 5).
+    public static let slowCall: TimeInterval = 330
 
     /// Whether the person signed in with an API key (Settings shows it, so they know what to delete on the server).
     public var usesAPIKey: Bool {
@@ -59,12 +67,16 @@ public actor FerretClient {
 
     // MARK: - Calls
 
-    public func get<T: Decodable>(_ path: String, query: [String: String?] = [:]) async throws -> T {
-        try decode(await perform(request(path, query: query)))
+    /// `timeout`: for a call that may take longer than a minute (`FerretClient.slowCall`).
+    public func get<T: Decodable>(_ path: String, query: [String: String?] = [:], timeout: TimeInterval? = nil) async throws -> T {
+        var r = request(path, query: query)
+        if let timeout { r.timeoutInterval = timeout }
+        return try decode(await perform(r))
     }
 
-    public func send<T: Decodable>(_ method: String, _ path: String, body: some Encodable) async throws -> T {
+    public func send<T: Decodable>(_ method: String, _ path: String, body: some Encodable, timeout: TimeInterval? = nil) async throws -> T {
         var r = request(path)
+        if let timeout { r.timeoutInterval = timeout }
         r.httpMethod = method
         r.setValue("application/json", forHTTPHeaderField: "Content-Type")
         r.httpBody = try JSONEncoder().encode(body)
@@ -145,6 +157,11 @@ public actor FerretClient {
             signOut()
             throw FerretError.signedOut
         }
+        if (300 ..< 400).contains(http.statusCode) {
+            // A redirect to another address isn't followed (it would carry the sign-in and Access token there).
+            let to = (http.value(forHTTPHeaderField: "Location")).flatMap { URL(string: $0, relativeTo: base.url)?.host() } ?? "?"
+            throw FerretError.server(status: http.statusCode, message: String(localized: "The server sent the app to another address (\(to)). Sign in with that address instead."))
+        }
         guard (200 ..< 300).contains(http.statusCode) else {
             throw FerretError.server(status: http.statusCode, message: FerretError.message(in: data) ?? HTTPURLResponse.localizedString(forStatusCode: http.statusCode))
         }
@@ -160,7 +177,7 @@ public actor FerretClient {
 
     /// Takes the kept session when another process has newer tokens for this server. True when it did.
     private func adoptKept() -> Bool {
-        guard let reload, let kept = reload(), kept.server == server, case .oauth(let keptTokens) = kept.credential,
+        guard let kept = store?.load(), kept.server == server, case .oauth(let keptTokens) = kept.credential,
               case .oauth(let tokens) = credential, keptTokens.refreshToken != tokens.refreshToken || keptTokens.accessToken != tokens.accessToken
         else { return false }
         credential = kept.credential
@@ -181,7 +198,10 @@ public actor FerretClient {
         do {
             let fresh = try await task.value
             credential = .oauth(fresh)
-            onSessionChange(Session(server: server, credential: credential, access: access))
+            let session = Session(server: server, credential: credential, access: access)
+            // Kept before anything else: the old refresh token is used up from now on.
+            do { try store?.save(session) } catch { onKeepFailed(error) }
+            onSessionChange(session)
             return fresh
         } catch FerretError.signedOut {
             // Turned away: unless another process refreshed meanwhile (then ours was simply used up), sign in again.
@@ -205,8 +225,20 @@ public actor FerretClient {
         }
     }
 
+    /// The sign-in ended: forgotten in the store too, unless the store already holds a different one (signed in again
+    /// meanwhile, perhaps in another process).
     private func signOut() {
+        if let store, let kept = store.load(), kept.server == server, Self.same(kept.credential, credential) { store.clear() }
         onSessionChange(nil)
+    }
+
+    /// The same sign-in (its refresh token, or key), whatever else changed.
+    static func same(_ a: Credential, _ b: Credential) -> Bool {
+        switch (a, b) {
+        case let (.oauth(x), .oauth(y)): (x.refreshToken ?? x.accessToken) == (y.refreshToken ?? y.accessToken)
+        case let (.apiKey(x), .apiKey(y)): x == y
+        default: false
+        }
     }
 
     private func decode<T: Decodable>(_ data: Data) throws -> T {

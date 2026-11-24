@@ -51,6 +51,9 @@ public enum FerretError: LocalizedError, Equatable, Sendable {
     static func isAccessBlock(_ response: URLResponse) -> Bool {
         guard let http = response as? HTTPURLResponse else { return false }
         if http.url?.host()?.hasSuffix("cloudflareaccess.com") == true { return true }
+        // Its redirect to the login page (not followed: it's another host).
+        if (300 ..< 400).contains(http.statusCode), let location = http.value(forHTTPHeaderField: "Location"),
+           URL(string: location)?.host()?.hasSuffix("cloudflareaccess.com") == true { return true }
         guard http.statusCode == 401 || http.statusCode == 403 else { return false }
         return http.allHeaderFields.keys.contains { ($0 as? String)?.lowercased().hasPrefix("cf-access") == true }
     }

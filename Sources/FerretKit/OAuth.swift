@@ -17,6 +17,8 @@ public enum OAuth {
         public var registration: URL
         /// What the tokens are for, as the server names it (RFC 9728).
         public var resource: String
+        /// Who issues the codes: the sign-in's reply names it (`iss`, RFC 9207) and must match.
+        public var issuer: String? = nil
 
         /// The server's own address, as it names itself (`https://ferret.example.com` from its resource
         /// `…/mcp`): use it rather than what was typed, which may be `http://` for a server that redirects to
@@ -44,8 +46,9 @@ public enum OAuth {
     public static func redirectURI(scheme: String) -> String { "\(scheme):/oauth" }
 
     /// Where to sign in on this server. Fails on a server too old for app sign-in (the app then offers an API key).
-    public static func discover(server: URL, session: URLSession = .shared) async throws -> Endpoints {
+    public static func discover(server: URL, session: URLSession = .ferret(access: nil)) async throws -> Endpoints {
         struct Metadata: Decodable {
+            let issuer: String?
             let authorization_endpoint: URL
             let token_endpoint: URL
             let registration_endpoint: URL?
@@ -54,11 +57,11 @@ public enum OAuth {
         let metadata: Metadata = try await getJSON(server.appending(path: ".well-known/oauth-authorization-server"), session)
         let resource: Resource = try await getJSON(server.appending(path: ".well-known/oauth-protected-resource/mcp"), session)
         guard let registration = metadata.registration_endpoint else { throw FerretError.signInUnavailable }
-        return Endpoints(authorization: metadata.authorization_endpoint, token: metadata.token_endpoint, registration: registration, resource: resource.resource)
+        return Endpoints(authorization: metadata.authorization_endpoint, token: metadata.token_endpoint, registration: registration, resource: resource.resource, issuer: metadata.issuer)
     }
 
     /// Registers the app with the server (once per server; the client id is kept with the tokens).
-    public static func register(_ endpoints: Endpoints, clientName: String, redirectURI: String = OAuth.redirectURI, session: URLSession = .shared) async throws -> String {
+    public static func register(_ endpoints: Endpoints, clientName: String, redirectURI: String = OAuth.redirectURI, session: URLSession = .ferret(access: nil)) async throws -> String {
         var request = URLRequest(url: endpoints.registration)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -78,12 +81,26 @@ public enum OAuth {
     }
 
     /// Everything up to opening the browser: endpoints, registration, PKCE, and the address to open.
-    public static func start(server: URL, clientName: String, redirectURI: String = OAuth.redirectURI, knownClientId: String? = nil, session: URLSession = .shared) async throws -> Start {
+    public static func start(server: URL, clientName: String, redirectURI: String = OAuth.redirectURI, knownClientId: String? = nil, session: URLSession = .ferret(access: nil)) async throws -> Start {
         let endpoints = try await discover(server: server, session: session)
-        let clientId: String
-        if let knownClientId { clientId = knownClientId } else { clientId = try await register(endpoints, clientName: clientName, redirectURI: redirectURI, session: session) }
         let verifier = randomURLSafe(32)
         let state = randomURLSafe(16)
+        func address(_ clientId: String) -> URL { authorizeURL(endpoints, clientId: clientId, redirectURI: redirectURI, state: state, verifier: verifier) }
+        var clientId: String
+        if let knownClientId {
+            clientId = knownClientId
+            // Ferret forgets a registration a week after nothing uses it (disconnected, or never approved): register
+            // again rather than open a sign-in page that can only say "client not found".
+            if await registrationGone(address(clientId), session: session) {
+                clientId = try await register(endpoints, clientName: clientName, redirectURI: redirectURI, session: session)
+            }
+        } else {
+            clientId = try await register(endpoints, clientName: clientName, redirectURI: redirectURI, session: session)
+        }
+        return Start(url: address(clientId), state: state, verifier: verifier, clientId: clientId, endpoints: endpoints, redirectURI: redirectURI)
+    }
+
+    static func authorizeURL(_ endpoints: Endpoints, clientId: String, redirectURI: String, state: String, verifier: String) -> URL {
         var parts = URLComponents(url: endpoints.authorization, resolvingAgainstBaseURL: false)!
         parts.queryItems = [
             URLQueryItem(name: "response_type", value: "code"),
@@ -95,17 +112,32 @@ public enum OAuth {
             URLQueryItem(name: "code_challenge_method", value: "S256"),
             URLQueryItem(name: "resource", value: endpoints.resource),
         ]
-        return Start(url: parts.url!, state: state, verifier: verifier, clientId: clientId, endpoints: endpoints, redirectURI: redirectURI)
+        return parts.url!
+    }
+
+    /// Whether the server no longer knows this registration: its sign-in address, asked without following the
+    /// redirect, sends an unknown client to an error (`error=invalid_client`) instead of the sign-in page. Anything
+    /// unclear (offline, another reply) counts as still known.
+    static func registrationGone(_ authorize: URL, session: URLSession) async -> Bool {
+        guard let (data, response) = try? await session.data(for: URLRequest(url: authorize), delegate: NoRedirects()),
+              let http = response as? HTTPURLResponse
+        else { return false }
+        let location = http.value(forHTTPHeaderField: "Location") ?? ""
+        return location.contains("error=invalid_client") || String(decoding: data.prefix(2000), as: UTF8.self).contains("invalid_client")
     }
 
     /// The browser came back to `redirectURI`: check the state and swap the code for tokens.
-    public static func finish(_ start: Start, callback: URL, session: URLSession = .shared) async throws -> OAuthTokens {
+    public static func finish(_ start: Start, callback: URL, session: URLSession = .ferret(access: nil)) async throws -> OAuthTokens {
         let items = URLComponents(url: callback, resolvingAgainstBaseURL: false)?.queryItems ?? []
         let value = { (name: String) in items.first { $0.name == name }?.value }
         if let error = value("error") {
             throw error == "access_denied" ? FerretError.cancelled : FerretError.server(status: 400, message: value("error_description") ?? error)
         }
         guard value("state") == start.state, let code = value("code") else { throw FerretError.server(status: 400, message: "The sign-in didn't come back as expected. Try again.") }
+        // The reply must come from the server the sign-in started at (RFC 9207: no mixing up two servers' replies).
+        if let issuer = start.endpoints.issuer, let iss = value("iss"), iss != issuer {
+            throw FerretError.server(status: 400, message: "The sign-in came back from a different server. Try again.")
+        }
         return try await tokenRequest(start.endpoints.token, [
             "grant_type": "authorization_code",
             "code": code,
@@ -117,7 +149,7 @@ public enum OAuth {
     }
 
     /// A new access token from the refresh token (which rotates: the old one is used up).
-    public static func refresh(_ tokens: OAuthTokens, session: URLSession = .shared) async throws -> OAuthTokens {
+    public static func refresh(_ tokens: OAuthTokens, session: URLSession = .ferret(access: nil)) async throws -> OAuthTokens {
         guard let refreshToken = tokens.refreshToken else { throw FerretError.signedOut }
         return try await tokenRequest(tokens.tokenEndpoint, [
             "grant_type": "refresh_token",
@@ -130,7 +162,7 @@ public enum OAuth {
     /// Signing out: the server forgets the refresh token (and the access tokens made from it), so a copy left anywhere
     /// is useless (RFC 7009). Best effort: a server without a revocation endpoint, or out of reach, is no reason to stay
     /// signed in, so this never throws.
-    public static func revoke(_ tokens: OAuthTokens, server: URL, session: URLSession = .shared) async {
+    public static func revoke(_ tokens: OAuthTokens, server: URL, session: URLSession = .ferret(access: nil)) async {
         struct Metadata: Decodable { let revocation_endpoint: URL? }
         guard let metadata: Metadata = try? await getJSON(server.appending(path: ".well-known/oauth-authorization-server"), session),
               let endpoint = metadata.revocation_endpoint
@@ -214,5 +246,12 @@ public enum OAuth {
         guard (200 ..< 300).contains(http.statusCode) else {
             throw FerretError.server(status: http.statusCode, message: FerretError.message(in: data) ?? HTTPURLResponse.localizedString(forStatusCode: http.statusCode))
         }
+    }
+}
+
+/// Hands back a redirect instead of following it (to read where the server would send a browser).
+final class NoRedirects: NSObject, URLSessionTaskDelegate, Sendable {
+    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest) async -> URLRequest? {
+        nil
     }
 }

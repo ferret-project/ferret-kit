@@ -17,13 +17,15 @@ Foundation, Security and CryptoKit only, so it builds for iOS and macOS and `swi
   browser (`ASWebAuthenticationSession`) is the app's part.
 - `FerretClient`: an actor that makes `/api/v1` calls as one signed-in person, refreshing the token once when several
   calls find it expired. Refresh tokens rotate and Ferret accepts a used one again for only a minute, so a refresh the
-  network cut short is tried again at once, and with `reload` the client reads the kept sign-in before refreshing (an
-  app, its share extension and widgets never use the same refresh token twice). Uploads stream from a file.
+  network cut short is tried again at once. Given the sign-in's `store`, the client keeps new tokens there before
+  anything else and reads it before refreshing (an app, its share extension and widgets never use the same refresh
+  token twice). Redirects are followed only on the same host (http → https), so neither the sign-in nor a Cloudflare
+  Access token is carried anywhere else. Uploads stream from a file; Ask may take minutes.
   `Inventory.swift` names the calls (`items`, `attention`, `ask`, `places`…).
 - `SessionStore`, `AccessTokenStore`: the sign-in and Cloudflare Access service tokens, in the Keychain: the data
   protection keychain when the app may use it (on a Mac, a build signed with a team), else the older file-based one.
   Saving throws when the Keychain refuses.
-- `ServerAddress`: turns what someone typed into a server address (`192.168.1.20:8787` → `http://…`).
+- `ServerAddress`: turns what someone typed into a server address: HTTPS unless `http://` is typed.
 - `OfflineStore`: things kept on the device for browsing without a connection.
 
 Apps using it: [Ferret for Mac](https://github.com/ferret-project/ferret-menu) (menu bar).

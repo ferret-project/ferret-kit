@@ -35,8 +35,13 @@ public actor OfflineStore {
     }
 
     private var index: URL { folder.appending(path: "index.json") }
-    private func itemFile(_ id: String) -> URL { folder.appending(path: "item-\(id).json") }
-    private func photoFile(_ photoId: String) -> URL { folder.appending(path: "photo-\(photoId)") }
+    private func itemFile(_ id: String) -> URL { folder.appending(path: Self.fileName("item", id)) }
+    private func photoFile(_ photoId: String) -> URL { folder.appending(path: Self.fileName("photo", photoId)) }
+
+    /// A file's name from an id the server sent, hashed: an id can never reach outside the folder (`../x`).
+    static func fileName(_ kind: String, _ id: String) -> String {
+        kind + "-" + SHA256.hash(data: Data(id.utf8)).prefix(16).map { String(format: "%02x", $0) }.joined()
+    }
 
     private func entries() -> [Entry] {
         guard let data = try? Data(contentsOf: index) else { return [] }
@@ -70,10 +75,10 @@ public actor OfflineStore {
         try files.createDirectory(at: staging, withIntermediateDirectories: true)
         var kept: [Entry] = []
         for thing in things {
-            try thing.json.write(to: staging.appending(path: "item-\(thing.id).json"))
+            try thing.json.write(to: staging.appending(path: Self.fileName("item", thing.id)))
             var photoId: String?
             if let id = thing.photoId, let photo = thing.photo {
-                try photo.write(to: staging.appending(path: "photo-\(id)"))
+                try photo.write(to: staging.appending(path: Self.fileName("photo", id)))
                 photoId = id
             }
             kept.append(Entry(id: thing.id, photoId: photoId, savedAt: now))
