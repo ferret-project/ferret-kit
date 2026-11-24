@@ -160,7 +160,7 @@ import Testing
         #expect(list.map(\.isUrgent) == [true, false, false])
         #expect(list[0].route == "#/items/i1")
         #expect(list[1].route == "#/settings/server")
-        #expect(list[2].route == "#/")
+        #expect(list[2].route == "#/maintenance")
         #expect(list[0].key == "warranty:w1")
     }
 
@@ -206,5 +206,23 @@ import Testing
         #expect(endpoints("https://inventory.lan/mcp").server?.absoluteString == "https://inventory.lan")
         #expect(endpoints("http://10.0.0.2:8787/mcp").server?.absoluteString == "http://10.0.0.2:8787")
         #expect(endpoints("not a url").server == nil)
+    }
+}
+
+@Suite struct BellRouteTests {
+    private func item(_ kind: String, itemId: String? = nil, href: String? = nil) -> AttentionItem {
+        AttentionItem(kind: kind, severity: "urgent", id: "x1", title: "", detail: "", itemId: itemId, href: href)
+    }
+
+    @Test func goesWhereFerretsOwnBellGoes() {
+        #expect(item("service").route == "#/settings/server")
+        #expect(item("backup").route == "#/settings/server")
+        #expect(item("roomscan").route == "#/room-scan/x1")
+        #expect(item("coverage").route == "#/coverage")
+        #expect(item("shopping").route == "#/shopping")
+        #expect(item("maintenance", itemId: "i").route == "#/maintenance")
+        #expect(item("warranty", itemId: "i").route == "#/items/i")
+        #expect(item("review").route == "#/maintenance")
+        #expect(item("service", href: "#/settings/notifications").route == "#/settings/notifications")
     }
 }

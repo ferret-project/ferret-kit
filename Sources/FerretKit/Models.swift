@@ -251,11 +251,18 @@ public struct AttentionItem: Decodable, Identifiable, Hashable, Sendable {
     /// Unique in one list: the same thing can need a warranty claim and maintenance.
     public var key: String { "\(kind):\(id)" }
 
-    /// Where it opens in Ferret's web app (`#/…`).
+    /// Where it opens in Ferret's web app (`#/…`): the same place Ferret's own bell goes (`hrefFor` in the web app's
+    /// AttentionBell.tsx) — a failing service or backup in Settings → Server, a room scan's review, the thing.
     public var route: String {
         if let href, href.hasPrefix("#/") { return href }
-        if let itemId { return itemRoute(itemId) }
-        return "#/"
+        switch kind {
+        case "roomscan": return "#/room-scan/\(id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed.subtracting(CharacterSet(charactersIn: "/"))) ?? id)"
+        case "backup", "service": return "#/settings/server"
+        case "coverage": return "#/coverage"
+        case "shopping": return "#/shopping"
+        case "maintenance": return "#/maintenance"
+        default: return itemId.map(itemRoute) ?? "#/maintenance"
+        }
     }
 
     public init(kind: String, severity: String, id: String, title: String, detail: String, itemId: String? = nil, date: String? = nil, href: String? = nil, photoId: String? = nil) {
