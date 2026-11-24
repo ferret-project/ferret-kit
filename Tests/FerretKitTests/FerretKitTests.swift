@@ -139,3 +139,59 @@ import Testing
         #expect(await two.things().isEmpty)
     }
 }
+
+@Suite struct AppRedirectTests {
+    @Test func eachAppHasItsOwnAddress() {
+        #expect(OAuth.redirectURI(scheme: "us.digitalempire.ferret.menu") == "us.digitalempire.ferret.menu:/oauth")
+        #expect(OAuth.redirectURI(scheme: OAuth.callbackScheme) == OAuth.redirectURI)
+    }
+}
+
+@Suite struct AttentionTests {
+    @Test func decodesTheBell() throws {
+        let json = Data("""
+        {"data":[
+          {"kind":"warranty","severity":"urgent","id":"w1","title":"Fridge warranty ends","detail":"in 3 days","itemId":"i1","date":"2026-11-27"},
+          {"kind":"backup","severity":"soon","id":"b1","title":"No backup","detail":"","itemId":null,"date":null,"href":"#/settings/server"},
+          {"kind":"maintenance","severity":"soon","id":"t1","title":"Gutters","detail":"due","itemId":null,"date":"2026-12-01"}
+        ]}
+        """.utf8)
+        let list = try JSONDecoder().decode(DataList<AttentionItem>.self, from: json).data
+        #expect(list.map(\.isUrgent) == [true, false, false])
+        #expect(list[0].route == "#/items/i1")
+        #expect(list[1].route == "#/settings/server")
+        #expect(list[2].route == "#/")
+        #expect(list[0].key == "warranty:w1")
+    }
+
+    @Test func decodesAnAnswer() throws {
+        let json = Data("""
+        {"answer":"Descale it monthly.","found":true,"citations":[
+          {"itemId":"i1","itemName":"Kettle","attachmentId":"a1","filename":"manual.pdf","section":"11 Descaling"},
+          {"itemId":"i2","itemName":"Drill"},
+          {"of":{"kind":"place","id":"p","name":"Garage"},"filename":"plan.pdf"}
+        ]}
+        """.utf8)
+        let answer = try JSONDecoder().decode(AskAnswer.self, from: json)
+        #expect(answer.found)
+        #expect(answer.citations.map(\.label) == ["Kettle — manual.pdf › 11 Descaling", "Drill", "plan.pdf"])
+    }
+}
+
+@Suite struct WebURLTests {
+    @Test func opensRoutesOnTheServer() {
+        let server = URL(string: "http://10.0.0.2:8787")!
+        #expect(webURL(server: server, route: "#/items/abc").absoluteString == "http://10.0.0.2:8787/#/items/abc")
+        #expect(webURL(server: URL(string: "https://ferret.example.com/")!, route: "/shopping").absoluteString == "https://ferret.example.com/#/shopping")
+        #expect(itemRoute("a/b c") == "#/items/a%2Fb%20c")
+    }
+
+    @Test func readsTheHousehold() throws {
+        let json = Data("""
+        {"user":{"id":"u","name":"Sam","email":"sam@example.com"},"activeHouseholdId":"h","household":{"id":"h","name":"Home","role":"viewer","readOnly":true}}
+        """.utf8)
+        let me = try JSONDecoder().decode(Me.self, from: json)
+        #expect(me.household?.name == "Home")
+        #expect(me.household?.readOnly == true)
+    }
+}

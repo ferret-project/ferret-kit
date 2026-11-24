@@ -25,7 +25,12 @@ public enum OAuth {
         public var verifier: String
         public var clientId: String
         public var endpoints: Endpoints
+        /// Where the browser comes back to: each app has its own (`OAuth.redirectURI` is the iPhone app's).
+        public var redirectURI: String
     }
+
+    /// The redirect address for an app's own scheme (`us.digitalempire.ferret.menu` → `us.digitalempire.ferret.menu:/oauth`).
+    public static func redirectURI(scheme: String) -> String { "\(scheme):/oauth" }
 
     /// Where to sign in on this server. Fails on a server too old for app sign-in (the app then offers an API key).
     public static func discover(server: URL, session: URLSession = .shared) async throws -> Endpoints {
@@ -42,7 +47,7 @@ public enum OAuth {
     }
 
     /// Registers the app with the server (once per server; the client id is kept with the tokens).
-    public static func register(_ endpoints: Endpoints, clientName: String, session: URLSession = .shared) async throws -> String {
+    public static func register(_ endpoints: Endpoints, clientName: String, redirectURI: String = OAuth.redirectURI, session: URLSession = .shared) async throws -> String {
         var request = URLRequest(url: endpoints.registration)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -62,10 +67,10 @@ public enum OAuth {
     }
 
     /// Everything up to opening the browser: endpoints, registration, PKCE, and the address to open.
-    public static func start(server: URL, clientName: String, knownClientId: String? = nil, session: URLSession = .shared) async throws -> Start {
+    public static func start(server: URL, clientName: String, redirectURI: String = OAuth.redirectURI, knownClientId: String? = nil, session: URLSession = .shared) async throws -> Start {
         let endpoints = try await discover(server: server, session: session)
         let clientId: String
-        if let knownClientId { clientId = knownClientId } else { clientId = try await register(endpoints, clientName: clientName, session: session) }
+        if let knownClientId { clientId = knownClientId } else { clientId = try await register(endpoints, clientName: clientName, redirectURI: redirectURI, session: session) }
         let verifier = randomURLSafe(32)
         let state = randomURLSafe(16)
         var parts = URLComponents(url: endpoints.authorization, resolvingAgainstBaseURL: false)!
@@ -79,7 +84,7 @@ public enum OAuth {
             URLQueryItem(name: "code_challenge_method", value: "S256"),
             URLQueryItem(name: "resource", value: endpoints.resource),
         ]
-        return Start(url: parts.url!, state: state, verifier: verifier, clientId: clientId, endpoints: endpoints)
+        return Start(url: parts.url!, state: state, verifier: verifier, clientId: clientId, endpoints: endpoints, redirectURI: redirectURI)
     }
 
     /// The browser came back to `redirectURI`: check the state and swap the code for tokens.
@@ -93,7 +98,7 @@ public enum OAuth {
         return try await tokenRequest(start.endpoints.token, [
             "grant_type": "authorization_code",
             "code": code,
-            "redirect_uri": redirectURI,
+            "redirect_uri": start.redirectURI,
             "client_id": start.clientId,
             "code_verifier": start.verifier,
             "resource": start.endpoints.resource,

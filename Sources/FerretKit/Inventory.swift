@@ -5,6 +5,23 @@ public extension FerretClient {
     func me() async throws -> Me { try await get("me") }
     func summary() async throws -> Summary { try await get("summary") }
 
+    /// What needs doing now (the bell), most urgent first.
+    func attention() async throws -> [AttentionItem] {
+        let list: DataList<AttentionItem> = try await get("attention")
+        return list.data
+    }
+
+    /// Ask Ferret a question about the household's things (needs an AI model on the server: a 409 otherwise).
+    func ask(_ question: String) async throws -> AskAnswer {
+        try await send("POST", "ask", body: ["question": question])
+    }
+
+    /// The things this person opened last, newest first (1–12).
+    func recentlyViewed(limit: Int = 6) async throws -> [Item] {
+        let list: DataList<Item> = try await get("recently-viewed", query: ["limit": String(limit)])
+        return list.data
+    }
+
     /// Things, newest change first; `query` searches (keywords and meaning), `locationId` includes places inside it.
     /// `missing`: things without that detail ("place", "photo", "value"…).
     func items(query: String? = nil, locationId: String? = nil, barcode: String? = nil, containerItemId: String? = nil, missing: String? = nil, topLevel: Bool = false, sort: String? = nil, limit: Int = 50, offset: Int = 0) async throws -> Page<Item> {
