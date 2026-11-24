@@ -94,3 +94,48 @@ import Testing
         #expect(session.access == nil)
     }
 }
+
+@Suite struct OfflineStoreTests {
+    private func store() -> (OfflineStore, URL) {
+        let root = FileManager.default.temporaryDirectory.appending(path: "offline-\(UUID().uuidString)", directoryHint: .isDirectory)
+        return (OfflineStore(server: URL(string: "https://ferret.example.com")!, root: root), root)
+    }
+
+    private func json(_ id: String, _ name: String, photoId: String? = nil) -> Data {
+        Data("{\"id\":\"\(id)\",\"name\":\"\(name)\"\(photoId.map { ",\"photoId\":\"\($0)\"" } ?? "")}".utf8)
+    }
+
+    @Test func keepsThingsInOrderWithPhotos() async throws {
+        let (store, root) = store()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try await store.replace(with: [
+            (id: "b", json: json("b", "Drill", photoId: "p1"), photoId: "p1", photo: Data([1, 2, 3])),
+            (id: "a", json: json("a", "Ladder"), photoId: nil, photo: nil),
+        ])
+        let kept = await store.things()
+        #expect(kept.map(\.item.name) == ["Drill", "Ladder"])
+        #expect(kept.first?.photo == Data([1, 2, 3]))
+        #expect(await store.keptPhoto("p1") == Data([1, 2, 3]))
+        #expect(await store.thing("a")?.item.name == "Ladder")
+    }
+
+    @Test func replacesWholeAndClears() async throws {
+        let (store, root) = store()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try await store.replace(with: [(id: "a", json: json("a", "Ladder"), photoId: nil, photo: nil)])
+        try await store.replace(with: [(id: "c", json: json("c", "Rake"), photoId: nil, photo: nil)])
+        #expect(await store.things().map(\.id) == ["c"])
+        #expect(await store.thing("a") == nil)
+        await store.clear()
+        #expect(await store.things().isEmpty)
+    }
+
+    @Test func oneFolderPerServer() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "offline-\(UUID().uuidString)", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let one = OfflineStore(server: URL(string: "https://one.example.com")!, root: root)
+        let two = OfflineStore(server: URL(string: "http://10.0.0.2:8787")!, root: root)
+        try await one.replace(with: [(id: "a", json: json("a", "Ladder"), photoId: nil, photo: nil)])
+        #expect(await two.things().isEmpty)
+    }
+}
