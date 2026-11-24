@@ -28,6 +28,17 @@ public actor FerretClient {
         return false
     }
 
+    /// The access token for the app's web screens (Ferret reads it from a cookie only the app's web view has), renewed
+    /// first if it ends within `seconds`. Nil when signed in with an API key (debug builds only).
+    public func webToken(lastingAtLeast seconds: TimeInterval = 600) async throws -> (token: String, expires: Date)? {
+        guard case .oauth(let tokens) = credential else { return nil }
+        if tokens.expiresAt.timeIntervalSinceNow < seconds {
+            let fresh = try await refreshedTokens(force: true)
+            return (fresh.accessToken, fresh.expiresAt)
+        }
+        return (tokens.accessToken, tokens.expiresAt)
+    }
+
     // MARK: - Calls
 
     public func get<T: Decodable>(_ path: String, query: [String: String?] = [:]) async throws -> T {
