@@ -17,6 +17,17 @@ public enum OAuth {
         public var registration: URL
         /// What the tokens are for, as the server names it (RFC 9728).
         public var resource: String
+
+        /// The server's own address, as it names itself (`https://ferret.example.com` from its resource
+        /// `…/mcp`): use it rather than what was typed, which may be `http://` for a server that redirects to
+        /// `https://` — and a redirect to another scheme drops the Authorization header from every API call.
+        public var server: URL? {
+            guard var parts = URLComponents(string: resource), let scheme = parts.scheme, scheme == "http" || scheme == "https", parts.host?.isEmpty == false else { return nil }
+            parts.path = ""
+            parts.query = nil
+            parts.fragment = nil
+            return parts.url
+        }
     }
 
     public struct Start: Sendable {

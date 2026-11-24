@@ -195,3 +195,16 @@ import Testing
         #expect(me.household?.readOnly == true)
     }
 }
+
+@Suite struct ServerFromResourceTests {
+    private func endpoints(_ resource: String) -> OAuth.Endpoints {
+        let u = URL(string: "https://x.example.com")!
+        return OAuth.Endpoints(authorization: u, token: u, registration: u, resource: resource)
+    }
+
+    @Test func theServerNamesItsOwnAddress() {
+        #expect(endpoints("https://inventory.lan/mcp").server?.absoluteString == "https://inventory.lan")
+        #expect(endpoints("http://10.0.0.2:8787/mcp").server?.absoluteString == "http://10.0.0.2:8787")
+        #expect(endpoints("not a url").server == nil)
+    }
+}
