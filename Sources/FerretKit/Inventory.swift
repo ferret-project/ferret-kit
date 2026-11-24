@@ -72,6 +72,33 @@ public extension FerretClient {
     func markSeen(_ itemId: String) async throws {
         let _: Empty = try await post("items/\(itemId)/seen")
     }
+
+    // MARK: Dealing with the bell
+
+    func maintenanceTask(_ id: String) async throws -> MaintenanceTask { try await get("maintenance/\(id)") }
+
+    /// Done: logged, and the next due date moves on from the day it was done.
+    func markDone(_ taskId: String, _ done: MaintenanceDone = MaintenanceDone()) async throws {
+        let _: Empty = try await send("POST", "maintenance/\(taskId)/done", body: done)
+    }
+
+    /// A loan is over: lent and back, or borrowed and given back.
+    func markReturned(_ loanId: String) async throws {
+        let _: Empty = try await post("loans/\(loanId)/returned")
+    }
+
+    // MARK: Shopping
+
+    func shopping() async throws -> ShoppingList { try await get("shopping") }
+
+    /// Changes a thing's count (never below 0): `delta` 2 after buying two.
+    func adjustStock(_ itemId: String, by delta: Int) async throws -> StockChange {
+        try await send("POST", "items/\(itemId)/stock", body: ["delta": delta])
+    }
+
+    func undoStock(_ movementId: String) async throws -> StockChange {
+        try await post("stock/movements/\(movementId)/undo")
+    }
 }
 
 /// Ferret label links: `https://<server>/l/ABC123` (QR codes and NFC stickers). Nil for anything else.

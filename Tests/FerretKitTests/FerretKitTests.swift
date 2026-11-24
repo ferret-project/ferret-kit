@@ -174,7 +174,33 @@ import Testing
         """.utf8)
         let answer = try JSONDecoder().decode(AskAnswer.self, from: json)
         #expect(answer.found)
-        #expect(answer.citations.map(\.label) == ["Kettle — manual.pdf › 11 Descaling", "Drill", "plan.pdf"])
+        #expect(answer.citations.map(\.label) == ["Kettle — manual.pdf › 11 Descaling", "Drill", "Garage — plan.pdf"])
+        #expect(answer.citations.map(\.route) == ["#/items/i1", "#/items/i2", "#/in/p"])
+    }
+
+    @Test func documentsOpenWhereTheyBelong() throws {
+        let json = Data("""
+        {"answer":"x","found":true,"citations":[
+          {"of":{"kind":"property","id":"h 1","name":"Home"},"filename":"deed.pdf"},
+          {"of":{"kind":"task","id":"t","name":"Furnace"},"filename":"invoice.pdf"},
+          {"filename":"loose.pdf"}
+        ]}
+        """.utf8)
+        let answer = try JSONDecoder().decode(AskAnswer.self, from: json)
+        #expect(answer.citations.map(\.route) == ["#/property/h%201", "#/maintenance", nil])
+    }
+
+    @Test func decodesTheShoppingListAndATask() throws {
+        let list = try JSONDecoder().decode(ShoppingList.self, from: Data("""
+        {"items":[{"id":"i1","name":"Furnace filter","place":"Garage","quantity":0,"minQuantity":2,"buy":3,"forTask":"Replace filter, due Nov 3","photoId":null,"unitCents":1299,"amazon":null,"amazonSearch":null}],"text":"- Furnace filter ×3"}
+        """.utf8))
+        #expect(list.items.first?.buy == 3)
+        let task = try JSONDecoder().decode(MaintenanceTask.self, from: Data("""
+        {"id":"t1","title":"Oil change","itemName":"Car","dueOn":"2026-12-01","usage":{"every":5000,"dueAt":45000,"unit":"miles","now":41000,"perDay":30},"notes":null}
+        """.utf8))
+        #expect(task.usage?.unit == "miles")
+        let done = try JSONSerialization.jsonObject(with: JSONEncoder().encode(MaintenanceDone(note: "ok"))) as! [String: Any]
+        #expect(done.keys.sorted() == ["note"])
     }
 }
 

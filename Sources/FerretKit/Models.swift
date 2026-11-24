@@ -256,7 +256,7 @@ public struct AttentionItem: Decodable, Identifiable, Hashable, Sendable {
     public var route: String {
         if let href, href.hasPrefix("#/") { return href }
         switch kind {
-        case "roomscan": return "#/room-scan/\(id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed.subtracting(CharacterSet(charactersIn: "/"))) ?? id)"
+        case "roomscan": return "#/room-scan/\(pathPart(id))"
         case "backup", "service": return "#/settings/server"
         case "coverage": return "#/coverage"
         case "shopping": return "#/shopping"
@@ -281,11 +281,32 @@ public struct AttentionItem: Decodable, Identifiable, Hashable, Sendable {
 /// `/ask`: Ask Ferret's answer from the household's own things and documents.
 public struct AskAnswer: Decodable, Sendable {
     public struct Citation: Decodable, Hashable, Sendable {
+        /// What a document belongs to when it isn't a thing's: a property, a place, or a house-wide task.
+        public struct Owner: Decodable, Hashable, Sendable {
+            /// "property", "place" or "task".
+            public let kind: String
+            public let id: String
+            public let name: String
+        }
+
         public let itemId: String?
         public let itemName: String?
+        public let of: Owner?
         public let attachmentId: String?
         public let filename: String?
         public let section: String?
+
+        /// Where it opens in Ferret's web app: the thing, else the property, place or Maintenance its document is on
+        /// (as Ferret's own Files list opens them). Nil when it says neither.
+        public var route: String? {
+            if let itemId { return itemRoute(itemId) }
+            guard let of else { return nil }
+            switch of.kind {
+            case "property": return "#/property/\(pathPart(of.id))"
+            case "place": return "#/in/\(pathPart(of.id))"
+            default: return "#/maintenance"
+            }
+        }
 
         /// What to show for it: the thing, and the document it's from.
         public var label: String {
@@ -293,7 +314,7 @@ public struct AskAnswer: Decodable, Sendable {
             switch (itemName, doc.isEmpty) {
             case let (name?, false): return "\(name) — \(doc)"
             case let (name?, true): return name
-            case (nil, false): return doc
+            case (nil, false): return of.map { "\($0.name) — \(doc)" } ?? doc
             default: return String(localized: "A document")
             }
         }
@@ -307,7 +328,73 @@ public struct AskAnswer: Decodable, Sendable {
 
 /// A thing's page in Ferret's web app (`#/items/<id>`).
 public func itemRoute(_ id: String) -> String {
-    "#/items/\(id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed.subtracting(CharacterSet(charactersIn: "/"))) ?? id)"
+    "#/items/\(pathPart(id))"
+}
+
+/// An id as one part of a route.
+func pathPart(_ id: String) -> String {
+    id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed.subtracting(CharacterSet(charactersIn: "/"))) ?? id
+}
+
+/// `/maintenance/:id`: what the menu needs of a task to mark it done.
+public struct MaintenanceTask: Decodable, Identifiable, Sendable {
+    /// Maintenance by use: every `every` of the item's `unit` (miles, hours…), next at `dueAt`; `now` is the latest reading.
+    public struct Usage: Decodable, Sendable {
+        public let every: Double
+        public let dueAt: Double
+        public let unit: String
+        public let now: Double?
+    }
+
+    public let id: String
+    public let title: String
+    public let itemName: String?
+    public let dueOn: String?
+    public let usage: Usage?
+}
+
+/// `POST /maintenance/:id/done`: when it was done and what's worth keeping. Only what's set is sent.
+public struct MaintenanceDone: Encodable, Sendable {
+    public var doneOn: String?
+    public var note: String?
+    public var costCents: Int?
+    /// Maintenance by use: what the item's counter says now.
+    public var reading: Double?
+
+    public init(doneOn: String? = nil, note: String? = nil, costCents: Int? = nil, reading: Double? = nil) {
+        self.doneOn = doneOn
+        self.note = note
+        self.costCents = costCents
+        self.reading = reading
+    }
+}
+
+/// `/shopping`: tracked things that have run out or are at or below "keep at least".
+public struct ShoppingList: Decodable, Sendable {
+    public struct Entry: Decodable, Identifiable, Hashable, Sendable {
+        /// The thing's id.
+        public let id: String
+        public let name: String
+        public let place: String?
+        public let quantity: Int
+        public let minQuantity: Int?
+        /// How many to buy: a restock barcode's pack size, else enough to be above the minimum.
+        public let buy: Int
+        /// Needed for maintenance coming up ("Replace furnace filter, due Nov 3").
+        public let forTask: String?
+        public let photoId: String?
+    }
+
+    public let items: [Entry]
+    /// The list as plain text, to copy.
+    public let text: String
+}
+
+/// A count changed (`POST /items/:id/stock`, or its undo).
+public struct StockChange: Decodable, Sendable {
+    public let quantity: Int
+    /// The movement to undo it with.
+    public let movementId: String?
 }
 
 /// A route in Ferret's web app (`#/…`) as an address on the server, to open in the browser.
