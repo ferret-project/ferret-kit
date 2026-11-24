@@ -7,7 +7,7 @@ public enum FerretError: LocalizedError, Equatable, Sendable {
     case cancelled
     /// The address answers, but it isn't a Ferret.
     case notFerret
-    /// This Ferret is too old for app sign-in: an API key still works.
+    /// This Ferret is too old for the app: its server admin needs to update it.
     case signInUnavailable
     case offline
     case server(status: Int, message: String)
@@ -17,7 +17,7 @@ public enum FerretError: LocalizedError, Equatable, Sendable {
         case .signedOut: String(localized: "You've been signed out. Sign in again.")
         case .cancelled: String(localized: "Sign-in cancelled.")
         case .notFerret: String(localized: "That address doesn't look like a Ferret server.")
-        case .signInUnavailable: String(localized: "This Ferret can't sign in apps yet. Use an API key from Settings → Claude & API instead.")
+        case .signInUnavailable: String(localized: "This Ferret is too old for the app. Ask whoever runs it to update Ferret.")
         case .offline: String(localized: "Can't reach the server. Check your connection.")
         case .server(_, let message): message
         }
