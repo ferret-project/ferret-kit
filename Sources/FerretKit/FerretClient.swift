@@ -4,21 +4,36 @@ import Foundation
 ///
 /// An actor so a token refresh happens once even when several requests hit an expired token together; the new
 /// tokens are handed to `onSessionChange` to be saved.
+///
+/// Refresh tokens rotate: each refresh uses the old one up, and Ferret accepts it again for only 60 seconds
+/// (`refreshTokenReuseInterval`) before treating a reuse as theft and ending every sign-in of this app. So a refresh
+/// whose reply was lost is tried again at once, inside that minute, and before refreshing the client reads the kept
+/// session (`reload`) in case another process sharing it (a share extension, a widget) refreshed first.
 public actor FerretClient {
     public nonisolated let server: URL
     private var credential: Credential
     private var refreshing: Task<OAuthTokens, Error>?
     private let urlSession: URLSession
     private let onSessionChange: @Sendable (Session?) -> Void
+    private let reload: (@Sendable () -> Session?)?
+    /// How long to wait before each new try of a refresh the network cut short (all well inside Ferret's minute).
+    let refreshRetries: [Duration]
 
     private let access: AccessToken?
 
     /// `urlSession`: for tests; otherwise one that adds the server's Cloudflare Access headers, if it has any.
-    public init(session: Session, urlSession: URLSession? = nil, onSessionChange: @escaping @Sendable (Session?) -> Void = { _ in }) {
+    /// `reload`: reads the kept session (the Keychain), so tokens another process refreshed are used, not used up again.
+    public init(session: Session, urlSession: URLSession? = nil, reload: (@Sendable () -> Session?)? = nil, onSessionChange: @escaping @Sendable (Session?) -> Void = { _ in }) {
+        self.init(session: session, urlSession: urlSession, reload: reload, refreshRetries: [.seconds(1), .seconds(4), .seconds(10)], onSessionChange: onSessionChange)
+    }
+
+    init(session: Session, urlSession: URLSession?, reload: (@Sendable () -> Session?)?, refreshRetries: [Duration], onSessionChange: @escaping @Sendable (Session?) -> Void) {
         server = session.server
         credential = session.credential
         access = session.access
         self.urlSession = urlSession ?? .ferret(access: session.access)
+        self.reload = reload
+        self.refreshRetries = refreshRetries
         self.onSessionChange = onSessionChange
     }
 
@@ -75,30 +90,26 @@ public actor FerretClient {
         try await perform(request(path))
     }
 
-    /// Uploads a file as multipart/form-data (`file`, plus text fields such as `kind`).
+    /// Uploads bytes already in memory (a photo just taken) as multipart/form-data: `file`, plus text fields such as
+    /// `kind`. They go through a temporary file like any other upload.
     public func upload<T: Decodable>(_ path: String, file: Data, filename: String, contentType: String, fields: [String: String] = [:]) async throws -> T {
+        let source = FileManager.default.temporaryDirectory.appending(path: "ferret-source-\(UUID().uuidString)")
+        try file.write(to: source)
+        defer { try? FileManager.default.removeItem(at: source) }
+        return try await upload(path, fileAt: source, filename: filename, contentType: contentType, fields: fields)
+    }
+
+    /// Uploads a file on disk as multipart/form-data, streamed: the body is written to a temporary file a piece at a
+    /// time and sent from there, so a large file is never held in memory whole.
+    public func upload<T: Decodable>(_ path: String, fileAt url: URL, filename: String, contentType: String, fields: [String: String] = [:]) async throws -> T {
         let boundary = "ferret-\(UUID().uuidString)"
-        var body = Data()
-        func line(_ s: String) { body.append(Data((s + "\r\n").utf8)) }
-        for (name, value) in fields.sorted(by: { $0.key < $1.key }) {
-            line("--\(boundary)")
-            line("Content-Disposition: form-data; name=\"\(name)\"")
-            line("")
-            line(value)
-        }
-        line("--\(boundary)")
-        line("Content-Disposition: form-data; name=\"file\"; filename=\"\(filename.replacingOccurrences(of: "\"", with: ""))\"")
-        line("Content-Type: \(contentType)")
-        line("")
-        body.append(file)
-        line("")
-        line("--\(boundary)--")
+        let body = try Multipart.write(file: url, filename: filename, contentType: contentType, fields: fields, boundary: boundary)
+        defer { try? FileManager.default.removeItem(at: body) }
         var r = request(path)
         r.httpMethod = "POST"
         r.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
-        r.httpBody = body
         r.timeoutInterval = 120
-        return try decode(await perform(r))
+        return try decode(await perform(r, bodyFile: body))
     }
 
     // MARK: - Plumbing
@@ -112,23 +123,24 @@ public actor FerretClient {
         return r
     }
 
-    private func perform(_ base: URLRequest, retried: Bool = false) async throws -> Data {
+    /// Sends a request with the current token (refreshed first if it's about to end); `bodyFile` is sent from disk.
+    private func perform(_ base: URLRequest, bodyFile: URL? = nil, retried: Bool = false) async throws -> Data {
         var r = base
-        r.setValue("Bearer \(try await currentBearer())", forHTTPHeaderField: "Authorization")
-        let data: Data
-        let response: URLResponse
-        do {
-            (data, response) = try await urlSession.data(for: r)
-        } catch let error as URLError where [.notConnectedToInternet, .networkConnectionLost, .cannotFindHost, .cannotConnectToHost, .timedOut, .dataNotAllowed].contains(error.code) {
-            throw FerretError.offline
+        let bearer = try await currentBearer()
+        r.setValue("Bearer \(bearer)", forHTTPHeaderField: "Authorization")
+        let (data, response) = try await FerretError.mappingOffline {
+            if let bodyFile { try await self.urlSession.upload(for: r, fromFile: bodyFile) } else { try await self.urlSession.data(for: r) }
         }
         guard let http = response as? HTTPURLResponse else { throw FerretError.notFerret }
         if FerretError.isAccessBlock(http) { throw FerretError.accessBlocked }
         if http.statusCode == 401 {
-            // An access token can end early (signed out on the web, server restarted): refresh once, then give up.
+            // An access token can end early (signed out on the web, server restarted): try once more with newer tokens
+            // (refreshed meanwhile here or by another process, else refreshed now), then give up.
             if case .oauth = credential, !retried {
-                _ = try await refreshedTokens(force: true)
-                return try await perform(base, retried: true)
+                if credential.bearer == bearer, !adoptKept() {
+                    _ = try await refreshedTokens(force: true)
+                }
+                return try await perform(base, bodyFile: bodyFile, retried: true)
             }
             signOut()
             throw FerretError.signedOut
@@ -146,12 +158,24 @@ public actor FerretClient {
         return credential.bearer
     }
 
+    /// Takes the kept session when another process has newer tokens for this server. True when it did.
+    private func adoptKept() -> Bool {
+        guard let reload, let kept = reload(), kept.server == server, case .oauth(let keptTokens) = kept.credential,
+              case .oauth(let tokens) = credential, keptTokens.refreshToken != tokens.refreshToken || keptTokens.accessToken != tokens.accessToken
+        else { return false }
+        credential = kept.credential
+        return true
+    }
+
     private func refreshedTokens(force: Bool) async throws -> OAuthTokens {
         if let refreshing { return try await refreshing.value }
+        // Another process may have refreshed already: its tokens are good, and ours are used up.
+        if adoptKept(), case .oauth(let kept) = credential, !kept.isExpiring { return kept }
         guard case .oauth(let tokens) = credential else { throw FerretError.signedOut }
         if !force, !tokens.isExpiring { return tokens }
         let session = urlSession
-        let task = Task { try await OAuth.refresh(tokens, session: session) }
+        let retries = refreshRetries
+        let task = Task { try await Self.refresh(tokens, session: session, retries: retries) }
         refreshing = task
         defer { refreshing = nil }
         do {
@@ -160,8 +184,24 @@ public actor FerretClient {
             onSessionChange(Session(server: server, credential: credential, access: access))
             return fresh
         } catch FerretError.signedOut {
+            // Turned away: unless another process refreshed meanwhile (then ours was simply used up), sign in again.
+            if adoptKept(), case .oauth(let kept) = credential { return kept }
             signOut()
             throw FerretError.signedOut
+        }
+    }
+
+    /// A refresh, tried again at once when the network cut it short: the server may have rotated the tokens before the
+    /// reply was lost, and the old refresh token only works again for a minute.
+    static func refresh(_ tokens: OAuthTokens, session: URLSession, retries: [Duration]) async throws -> OAuthTokens {
+        var waits = retries[...]
+        while true {
+            do {
+                return try await OAuth.refresh(tokens, session: session)
+            } catch FerretError.offline {
+                guard let wait = waits.popFirst() else { throw FerretError.offline }
+                try await Task.sleep(for: wait)
+            }
         }
     }
 
@@ -175,6 +215,46 @@ public actor FerretClient {
             return try JSONDecoder().decode(T.self, from: data)
         } catch {
             throw FerretError.server(status: 200, message: "Unexpected reply from the server (\(error.localizedDescription))")
+        }
+    }
+}
+
+/// multipart/form-data bodies, written to a temporary file in pieces.
+enum Multipart {
+    /// A header value with nothing that could end the line it's on (a filename with a line break would start new
+    /// headers or parts) or the quotes around it.
+    static func safe(_ value: String) -> String {
+        String(value.unicodeScalars.filter { !CharacterSet.newlines.contains($0) && $0 != "\"" && $0 != "\0" })
+    }
+
+    static func write(file: URL, filename: String, contentType: String, fields: [String: String], boundary: String) throws -> URL {
+        let out = FileManager.default.temporaryDirectory.appending(path: "ferret-upload-\(UUID().uuidString)")
+        guard FileManager.default.createFile(atPath: out.path, contents: nil) else { throw CocoaError(.fileWriteUnknown) }
+        do {
+            let writer = try FileHandle(forWritingTo: out)
+            defer { try? writer.close() }
+            func line(_ text: String) throws { try writer.write(contentsOf: Data((text + "\r\n").utf8)) }
+            for (name, value) in fields.sorted(by: { $0.key < $1.key }) {
+                try line("--\(boundary)")
+                try line("Content-Disposition: form-data; name=\"\(safe(name))\"")
+                try line("")
+                try line(value)
+            }
+            try line("--\(boundary)")
+            try line("Content-Disposition: form-data; name=\"file\"; filename=\"\(safe(filename))\"")
+            try line("Content-Type: \(safe(contentType))")
+            try line("")
+            let reader = try FileHandle(forReadingFrom: file)
+            defer { try? reader.close() }
+            while let chunk = try reader.read(upToCount: 1 << 20), !chunk.isEmpty {
+                try writer.write(contentsOf: chunk)
+            }
+            try line("")
+            try line("--\(boundary)--")
+            return out
+        } catch {
+            try? FileManager.default.removeItem(at: out)
+            throw error
         }
     }
 }

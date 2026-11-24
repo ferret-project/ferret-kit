@@ -72,7 +72,7 @@ public enum OAuth {
             "scope": scopes,
         ])
         struct Registered: Decodable { let client_id: String }
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await FerretError.mappingOffline { try await session.data(for: request) }
         try check(response, data)
         return try JSONDecoder().decode(Registered.self, from: data).client_id
     }
@@ -150,7 +150,9 @@ public enum OAuth {
         request.httpMethod = "POST"
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
         request.httpBody = formBody(form)
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await FerretError.mappingOffline { try await session.data(for: request) }
+        // Cloudflare Access turning the app away isn't the sign-in ending: keep it, and say what's wrong.
+        if FerretError.isAccessBlock(response) { throw FerretError.accessBlocked }
         if let http = response as? HTTPURLResponse, http.statusCode == 400 || http.statusCode == 401, form["grant_type"] == "refresh_token" {
             // A refresh token that's used up, revoked (Disconnect in Settings) or expired: sign in again.
             throw FerretError.signedOut
@@ -199,7 +201,7 @@ public enum OAuth {
     }
 
     static func getJSON<T: Decodable>(_ url: URL, _ session: URLSession) async throws -> T {
-        let (data, response) = try await session.data(from: url)
+        let (data, response) = try await FerretError.mappingOffline { try await session.data(from: url) }
         if FerretError.isAccessBlock(response) { throw FerretError.accessBlocked }
         if let http = response as? HTTPURLResponse, http.statusCode == 404 { throw FerretError.signInUnavailable }
         try check(response, data)

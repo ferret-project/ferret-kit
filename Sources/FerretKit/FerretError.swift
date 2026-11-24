@@ -31,6 +31,21 @@ public enum FerretError: LocalizedError, Equatable, Sendable {
         return false
     }
 
+    /// The network errors that mean "can't reach the server right now" (rather than a fault in what was sent).
+    static let offlineCodes: Set<URLError.Code> = [
+        .notConnectedToInternet, .networkConnectionLost, .cannotFindHost, .cannotConnectToHost, .timedOut, .dataNotAllowed,
+        .dnsLookupFailed, .internationalRoamingOff, .callIsActive,
+    ]
+
+    /// Runs a network call, turning "can't reach it" errors into `offline` — for every call, refreshes included.
+    static func mappingOffline<T>(isolation: isolated (any Actor)? = #isolation, _ call: () async throws -> T) async throws -> T {
+        do {
+            return try await call()
+        } catch let error as URLError where offlineCodes.contains(error.code) {
+            throw FerretError.offline
+        }
+    }
+
     /// Cloudflare Access turned the request away: it redirects to its login page (`*.cloudflareaccess.com`), or answers
     /// 401/403 itself (its own responses carry `cf-access-…` headers or come from its domain).
     static func isAccessBlock(_ response: URLResponse) -> Bool {

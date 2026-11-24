@@ -54,6 +54,11 @@ public extension FerretClient {
         try await upload("items/\(itemId)/attachments", file: data, filename: filename, contentType: contentType, fields: ["kind": kind])
     }
 
+    /// Adds a file on disk to a thing, streamed (never read into memory whole).
+    func addFile(to itemId: String, fileAt url: URL, filename: String, contentType: String, kind: String = "photo") async throws -> Attachment {
+        try await upload("items/\(itemId)/attachments", fileAt: url, filename: filename, contentType: contentType, fields: ["kind": kind])
+    }
+
     func makeMainPhoto(_ attachmentId: String) async throws {
         let _: Empty = try await post("attachments/\(attachmentId)/main")
     }
