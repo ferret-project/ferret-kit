@@ -6,12 +6,14 @@ public extension FerretClient {
     func summary() async throws -> Summary { try await get("summary") }
 
     /// Things, newest change first; `query` searches (keywords and meaning), `locationId` includes places inside it.
-    func items(query: String? = nil, locationId: String? = nil, barcode: String? = nil, containerItemId: String? = nil, topLevel: Bool = false, sort: String? = nil, limit: Int = 50, offset: Int = 0) async throws -> Page<Item> {
+    /// `missing`: things without that detail ("place", "photo", "value"…).
+    func items(query: String? = nil, locationId: String? = nil, barcode: String? = nil, containerItemId: String? = nil, missing: String? = nil, topLevel: Bool = false, sort: String? = nil, limit: Int = 50, offset: Int = 0) async throws -> Page<Item> {
         try await get("items", query: [
             "q": query?.isEmpty == false ? query : nil,
             "locationId": locationId,
             "barcode": barcode,
             "containerItemId": containerItemId,
+            "missing": missing,
             "topLevel": topLevel ? "true" : nil,
             "sort": sort,
             "limit": String(limit),
