@@ -11,6 +11,8 @@ public struct SessionStore: Sendable {
     }
 
     public func load() -> Session? { item.load().flatMap { try? JSONDecoder().decode(Session.self, from: $0) } }
+    /// Whether one is saved, without reading it (so macOS never asks to allow access just for this).
+    public func exists() -> Bool { item.exists() }
     public func save(_ session: Session) { (try? JSONEncoder().encode(session)).map(item.save) }
     public func clear() { item.clear() }
 }
@@ -48,6 +50,15 @@ struct KeychainItem: Sendable {
         var result: CFTypeRef?
         guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess, let data = result as? Data else { return nil }
         return data
+    }
+
+    func exists() -> Bool {
+        var query = base()
+        query[kSecReturnAttributes as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        query[kSecUseAuthenticationUI as String] = kSecUseAuthenticationUIFail
+        let status = SecItemCopyMatching(query as CFDictionary, nil)
+        return status == errSecSuccess || status == errSecInteractionNotAllowed
     }
 
     func save(_ data: Data) {
