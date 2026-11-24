@@ -28,15 +28,18 @@ public actor FerretClient {
         return false
     }
 
-    /// The access token for the app's web screens (Ferret reads it from a cookie only the app's web view has), renewed
-    /// first if it ends within `seconds`. Nil when signed in with an API key (debug builds only).
-    public func webToken(lastingAtLeast seconds: TimeInterval = 600) async throws -> (token: String, expires: Date)? {
-        guard case .oauth(let tokens) = credential else { return nil }
-        if tokens.expiresAt.timeIntervalSinceNow < seconds {
-            let fresh = try await refreshedTokens(force: true)
-            return (fresh.accessToken, fresh.expiresAt)
-        }
-        return (tokens.accessToken, tokens.expiresAt)
+    /// A one-time link (good once, for a minute) that signs the app's web view in to Ferret's web screens, with the
+    /// app's own limits; Ferret sets the cookie itself when the web view opens it. `to` is the screen (`#/…`). Nil when
+    /// signed in with an API key (debug builds only): those screens then ask for a sign-in of their own.
+    public func webSignInLink(to route: String?) async throws -> WebSignInLink? {
+        guard case .oauth = credential else { return nil }
+        return try await send("POST", "/app/web-session", body: WebSignInRequest(to: route))
+    }
+
+    /// Signing out: the web screens' sign-ins for this app end on the server too.
+    public func endWebSignIns() async throws {
+        guard case .oauth = credential else { return }
+        try await delete("/app/web-session")
     }
 
     // MARK: - Calls
@@ -173,6 +176,22 @@ public actor FerretClient {
         } catch {
             throw FerretError.server(status: 200, message: "Unexpected reply from the server (\(error.localizedDescription))")
         }
+    }
+}
+
+struct WebSignInRequest: Encodable, Sendable {
+    let to: String?
+}
+
+/// Where the web view goes to sign in (`url`, a path on the server), and when that sign-in will end.
+public struct WebSignInLink: Decodable, Sendable {
+    public let url: String
+    let expiresAt: String
+
+    public var expires: Date? {
+        let withFraction = ISO8601DateFormatter()
+        withFraction.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return withFraction.date(from: expiresAt) ?? ISO8601DateFormatter().date(from: expiresAt)
     }
 }
 
