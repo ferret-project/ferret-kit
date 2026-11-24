@@ -11,10 +11,14 @@ public actor FerretClient {
     private let urlSession: URLSession
     private let onSessionChange: @Sendable (Session?) -> Void
 
-    public init(session: Session, urlSession: URLSession = .shared, onSessionChange: @escaping @Sendable (Session?) -> Void = { _ in }) {
+    private let access: AccessToken?
+
+    /// `urlSession`: for tests; otherwise one that adds the server's Cloudflare Access headers, if it has any.
+    public init(session: Session, urlSession: URLSession? = nil, onSessionChange: @escaping @Sendable (Session?) -> Void = { _ in }) {
         server = session.server
         credential = session.credential
-        self.urlSession = urlSession
+        access = session.access
+        self.urlSession = urlSession ?? .ferret(access: session.access)
         self.onSessionChange = onSessionChange
     }
 
@@ -105,6 +109,7 @@ public actor FerretClient {
             throw FerretError.offline
         }
         guard let http = response as? HTTPURLResponse else { throw FerretError.notFerret }
+        if FerretError.isAccessBlock(http) { throw FerretError.accessBlocked }
         if http.statusCode == 401 {
             // An access token can end early (signed out on the web, server restarted): refresh once, then give up.
             if case .oauth = credential, !retried {
@@ -138,7 +143,7 @@ public actor FerretClient {
         do {
             let fresh = try await task.value
             credential = .oauth(fresh)
-            onSessionChange(Session(server: server, credential: credential))
+            onSessionChange(Session(server: server, credential: credential, access: access))
             return fresh
         } catch FerretError.signedOut {
             signOut()

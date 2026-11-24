@@ -68,3 +68,29 @@ import Testing
         #expect(page.total == 1)
     }
 }
+
+@Suite struct AccessTokenTests {
+    @Test func headersAndCompleteness() {
+        let token = AccessToken(clientId: " abc.access ", clientSecret: "s3cret\n")
+        #expect(token.headers == ["CF-Access-Client-Id": "abc.access", "CF-Access-Client-Secret": "s3cret"])
+        #expect(token.isComplete)
+        #expect(!AccessToken(clientId: "abc", clientSecret: " ").isComplete)
+        #expect(URLSession.ferret(access: nil) === URLSession.shared)
+        #expect(URLSession.ferret(access: token).configuration.httpAdditionalHeaders?["CF-Access-Client-Id"] as? String == "abc.access")
+    }
+
+    @Test func recognisesAccessTurningTheAppAway() {
+        let login = HTTPURLResponse(url: URL(string: "https://team.cloudflareaccess.com/cdn-cgi/access/login")!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+        #expect(FerretError.isAccessBlock(login))
+        let refused = HTTPURLResponse(url: URL(string: "https://ferret.example.com/api/v1/me")!, statusCode: 403, httpVersion: nil, headerFields: ["cf-access-domain": "ferret.example.com"])!
+        #expect(FerretError.isAccessBlock(refused))
+        let ferrets = HTTPURLResponse(url: URL(string: "https://ferret.example.com/api/v1/me")!, statusCode: 401, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!
+        #expect(!FerretError.isAccessBlock(ferrets))
+    }
+
+    @Test func oldSessionsWithoutATokenStillDecode() throws {
+        let json = #"{"server":"https://ferret.example.com","credential":{"apiKey":{"_0":"ferret_x"}}}"#
+        let session = try JSONDecoder().decode(Session.self, from: Data(json.utf8))
+        #expect(session.access == nil)
+    }
+}

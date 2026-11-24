@@ -168,12 +168,14 @@ public enum OAuth {
 
     static func getJSON<T: Decodable>(_ url: URL, _ session: URLSession) async throws -> T {
         let (data, response) = try await session.data(from: url)
+        if FerretError.isAccessBlock(response) { throw FerretError.accessBlocked }
         if let http = response as? HTTPURLResponse, http.statusCode == 404 { throw FerretError.signInUnavailable }
         try check(response, data)
         do { return try JSONDecoder().decode(T.self, from: data) } catch { throw FerretError.notFerret }
     }
 
     static func check(_ response: URLResponse, _ data: Data) throws {
+        if FerretError.isAccessBlock(response) { throw FerretError.accessBlocked }
         guard let http = response as? HTTPURLResponse else { throw FerretError.notFerret }
         guard (200 ..< 300).contains(http.statusCode) else {
             throw FerretError.server(status: http.statusCode, message: FerretError.message(in: data) ?? HTTPURLResponse.localizedString(forStatusCode: http.statusCode))
